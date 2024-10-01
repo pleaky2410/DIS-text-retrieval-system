@@ -5,9 +5,22 @@ from nltk.stem import PorterStemmer, WordNetLemmatizer
 import numpy as np
 from enum import Enum
 import pickle
-import json
+import argparse
 import os
 from concurrent.futures import ProcessPoolExecutor
+import ijson
+from functools import partial
+from ko_ww_stopwords.stop_words import ko_ww_stop_words
+import kr_sentence.tokenizer 
+import pyarabic.araby
+import pyarabic.araby_const
+import tkseem as tk
+import pyarabic
+import spacy
+import stanza
+import gc
+from nltk.stem import ISRIStemmer
+
 
 CORPUS_PATH = "data/corpus.json"
 DEV_PATH = "data/dev.csv"
@@ -16,12 +29,18 @@ TRAIN_PATH = "data/train.csv"
 
 
 
-LOAD_BATCH_SIZE = 10000
+LOAD_BATCH_SIZE = 200
 
+nltk.download('wordnet', quiet=True)
 nltk.download('stopwords', quiet=True)
+nltk.download('punkt_tab', quiet=True)
 
-stemmer = PorterStemmer()
-lemmatizer = WordNetLemmatizer()
+nlp_en = spacy.load("en_core_web_sm")
+nlp_fr = spacy.load("fr_core_news_sm")
+nlp_de = spacy.load("de_core_news_sm")
+nlp_es = spacy.load("es_core_news_sm")
+nlp_it = spacy.load("it_core_news_sm")
+nlp_ko = spacy.load("ko_core_news_sm")
 
 class Lang(Enum):
     ENGLISH = 'en'
@@ -32,6 +51,46 @@ class Lang(Enum):
     ARABIC = 'ar'
     KOREAN = 'ko'
 
+
+def get_nlp_pipeline(lang: Lang):
+    global nlp_en, nlp_fr, nlp_de, nlp_es, nlp_it, nlp_ar, nlp_ko
+    if lang.value == Lang.ENGLISH.value:
+        if nlp_en is None:
+            nlp_en = spacy.load("en_core_web_sm")
+        return nlp_en
+    elif lang.value == Lang.FRENCH.value:
+        if nlp_fr is None:
+            nlp_fr = spacy.load("fr_core_news_sm")
+        return nlp_fr
+    elif lang.value == Lang.GERMAN.value:
+        if nlp_de is None:
+            nlp_de = spacy.load("de_core_news_sm")
+        return nlp_de
+    elif lang.value == Lang.SPANISH.value:
+        if nlp_es is None:
+            nlp_es = spacy.load("es_core_news_sm")
+        return nlp_es
+    elif lang.value == Lang.ITALIAN.value:
+        if nlp_it is None:
+            nlp_it = spacy.load("it_core_news_sm")
+        return nlp_it
+    elif lang.value == Lang.KOREAN.value:
+        if nlp_ko is None:
+            nlp_ko = spacy.load("ko_core_news_sm")
+        return nlp_ko
+    else:
+        raise Exception("Language not supported")
+
+def cleanup_all():
+    global nlp_en, nlp_fr, nlp_de, nlp_es, nlp_it, nlp_ko
+    nlp_en = None
+    nlp_fr = None
+    nlp_de = None
+    nlp_es = None
+    nlp_it = None
+    nlp_ko = None
+    del nlp_en, nlp_fr, nlp_de, nlp_es, nlp_it, nlp_ko
+    gc.collect()
 
 def get_stopwords(lang: Lang):
     if lang.value == Lang.ENGLISH.value:
@@ -50,16 +109,15 @@ def get_stopwords(lang: Lang):
         return set(stopwords.words('italian'))
     
     elif lang.value == Lang.ARABIC.value:
-            return set() # TODO
+            return set(stopwords.words('arabic')) # TODO
 
     elif lang.value == Lang.KOREAN.value:
-            return set() # TODO
+            return set(ko_ww_stop_words) # TODO
     
     else:
          raise Exception("Language not supported")
 
-
-def preprocess_text(text: str, lang: Lang):
+def preprocess_text(text: str, lang: Lang, args):
     """
     Preprocess the input text by lowercasing, removing punctuation, 
     tokenizing, removing stop words, and stemming.
@@ -71,32 +129,37 @@ def preprocess_text(text: str, lang: Lang):
     list: A list of processed tokens.
     """
     # Lowercase the text and remove punctuation in a single step
-    text = re.sub(r'[^\w\s]', '', text.lower())
-
-    stopwords_lang = get_stopwords(lang)
+    if args.lowercase:
+        text = text.lower()
     
-    tokens = [
-        token
-        for token in text.split()
-        if token not in stopwords_lang
-    ]
+    if args.remove_punctuation:
+        text = re.sub(r'[^\w\s]', '', text)
+    
+    if lang == Lang.ARABIC:
+        tokens = nltk.word_tokenize(text)
+    
+    else :
+        nlp = get_nlp_pipeline(lang)
+        doc = nlp(text)
+        tokens = [token.text for token in doc]
 
+    if args.stopwords:
+        stopwords_lang = get_stopwords(lang)
+        tokens = [
+            token
+            for token in tokens
+            if token not in stopwords_lang
+        ]
+    
+    if args.lemmatize:
+        if lang == Lang.ARABIC:
+            stemmer = ISRIStemmer()
+            tokens = [stemmer.suf32(word) for word in tokens]
+        else:
+            tokens = [token.lemma_ for token in doc]
+    
     return tokens
 
-
-def stem_tokens(tokens):
-    """
-    Stems the received tokens 
-    """
-    return [stemmer.stem(token) for token in tokens]
-
-
-def lemmatize_tokens(tokens):
-    """
-    Lemmatizes the received tokens
-    """
-    return [lemmatizer.lemmatize(token) for token in tokens]
-    
 
 def cossine_similarity(vec1, vec2):
     """
@@ -111,34 +174,14 @@ def cossine_similarity(vec1, vec2):
     return dot_prod / (norm_vec1 * norm_vec2)
 
 
-def compute_vocabulary(documents, save_path="./.cache/vocabulary"):
-    """
-    Compute the vocabulary of a list of documents.
-    """
-    vocabulary = set()
-    for doc in documents:
-        vocabulary.update(doc.getTokens())
-    
-    if save_path:
-        with open(save_path, "wb") as f:
-            pickle.dump(vocabulary, f)
-    
-    return vocabulary
-
 class Document:
     """
     Represents a document in a specific language.
     """
-    def __init__(self, content: str, lang: Lang, id: int, preprocess_func):
-        self.tokens = preprocess_func(content)
+    def __init__(self, content: str, lang: Lang, id: int, preprocess_func, args):
+        self.tokens = preprocess_func(content, lang, args)
         self.lang = lang
         self.id = id
-    
-    def stem(self):
-        self.tokens = stem_tokens(self.tokens)
-    
-    def lemmatize(self):
-        self.tokens = lemmatize_tokens(self.tokens)
     
     def __str__(self):
         return f"Document {self.id} - {self.lang.name}: {self.tokens[:30]}..."
@@ -191,43 +234,77 @@ class Query:
 def simple_split(content):
     return content.split()
 
-PREPROCESS_FUNC = simple_split
-
-def batch_load_documents(executor, path=CORPUS_PATH, preprocess_func=simple_split):
+def batch_load_documents(executor, divide_batch, args, path=CORPUS_PATH, preprocess_func=simple_split):
     """
     Load documents from a file.
     """
 
+    partial_create_doc = partial(create_doc, args=args)
     # Reading the JSON file
-    with open(path, "r", encoding="utf-8") as f:
-        corpus = json.load(f)
-        len_corpus = len(corpus)
-        print(f"Loaded {len(corpus)} documents.")
-        for i in range(0, len(corpus), LOAD_BATCH_SIZE):
-            last_idx = min(i + LOAD_BATCH_SIZE, len_corpus)
-            batch_content = corpus[i:last_idx]
-            batch = list(executor.map(create_doc, batch_content, chunksize=LOAD_BATCH_SIZE // 32))
+    batch_raw = []
+    with open(path, "r") as f:
+        raw_docs = ijson.items(f, "item")
 
-            yield batch
+        for raw_doc in raw_docs:
+            batch_raw.append(raw_doc)
+            if len(batch_raw) == LOAD_BATCH_SIZE:
+                yield list(executor.map(partial_create_doc, batch_raw, chunksize=LOAD_BATCH_SIZE // divide_batch))
+                batch_raw = []
+            
+            
+        if len(batch_raw) > 0:
+            yield list(executor.map(partial_create_doc, batch_raw, chunksize=LOAD_BATCH_SIZE // divide_batch))
 
-    # for doc in corpus:
-    #     docid = doc["docid"]
-    #     text = doc["text"]
-    #     lang = doc["lang"]
-    #     batch.append(Document(text, Lang(lang), docid, preprocess_func))
-
-    #     if len(batch) == LOAD_BATCH_SIZE:
-    #         yield batch
-    #         batch = []
-        
-    # if len(batch) > 0:
-    #     yield batch
 
 def save(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(data, f)
 
+def load(path):
+    with open(path, "rb") as f:
+        return pickle.load(f)
 
-def create_doc(raw_doc):
-    return Document(raw_doc["text"], Lang(raw_doc["lang"]), raw_doc["docid"], simple_split)
+def create_doc(raw_doc, args):
+    return Document(raw_doc["text"], Lang(raw_doc["lang"]), raw_doc["docid"], preprocess_text, args)
+
+
+def load_lazy_arrays(path):
+    with open(path, "rb") as f:
+        while True:
+            try:
+                yield pickle.load(f)
+            except EOFError:
+                break
+
+
+def get_args():
+    parser = argparse.ArgumentParser(description="Process command-line arguments.")
+
+    parser.add_argument('--lemmatize', type=bool, default=False, help="Whether to lematize the documents or not.")
+    parser.add_argument('--stem', type=bool, default=False, help="Whether to stem the documents or not.")
+    parser.add_argument('--stopwords', type=bool, default=False, help="Whether to remove stopwords from the documents or not.")
+    parser.add_argument('--lowercase', type=bool, default=False, help="Whether to lowercase the documents or not.")
+    parser.add_argument('--remove_punctuation', type=bool, default=False, help="Whether to remove punctuation from the documents or not.")
+    parser.add_argument('--remove_numbers', type=bool, default=False, help="Whether to remove numbers from the documents or not.")
+    parser.add_argument('--remove_special_characters', type=bool, default=False, help="Whether to remove special characters from the documents or not.")
+    parser.add_argument('--use_prob_idf', type=bool, default=False, help="Whether to use probabilistic idf or not.")
+    parser.add_argument('--use_tf_log_ave', type=bool, default=False, help="Whether to use log average tf or not.")
+    parser.add_argument('--uset_tf_augmented', type=bool, default=False, help="Whether to use augmented tf or not.")
+    parser.add_argument('--use_tf_boolean', type=bool, default=False, help="Whether to use boolean tf or not.")
+    parser.add_argument('--use_tf_log', type=bool, default=False, help="Whether to use log tf or not.")
+    parser.add_argument('--use_normalization_pivot', type=bool, default=False, help="Whether to use pivot normalization or not.")
+    parser.add_argument('--idf_save_path', type=str, required=True, help="The path to save the idf scores.")
+    parser.add_argument('--tf_idf_save_path', type=str, required=True, help="The path to save the tf-idf scores.")
+    parser.add_argument('--vocab_path', type=str, default=None, help="The path to load the vocabulary.")
+    parser.add_argument('--vocab_save_path', type=str, default='.cache/vocabulary_raw.pkl', help="The path to save the vocabulary, if it does not exist yet")
+    parser.add_argument('--vocab_mapping_save_path', type=str, default='.cache/vocabulary_mapping.pkl', help="The path to save the vocabulary, if it does not exist yet")
+    parser.add_argument('--tf_idf_arrays_save_path', type=str, default='.cache/arrays.pkl', help="The path to save the vocabulary, if it does not exist yet")
+    parser.add_argument('--inference', type=bool, default=False, help="Whether to run inference or not.")
+    parser.add_argument('--idf_path', type=str, default=None, help="The path to load the idf scores.")
+    parser.add_argument('--tf_idf_path', type=str, default=None, help="The path to load the tf-idf scores.")
+
+
+    # Parse the arguments
+    args = parser.parse_args()
+    return args
