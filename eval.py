@@ -47,7 +47,7 @@ def recall_at_k(expected_doc_ids: set, retrieved_doc_ids: list, k=None) -> float
     return set_intersect(expected_doc_ids, retrieved_doc_ids_set) / len(expected_doc_ids)
 
 
-def mean_average_precision(expected_doc_ids: list, retrieved_doc_ids: list)
+def mean_average_precision(expected_doc_ids: list, retrieved_doc_ids: list):
    """
    Compute the mean average precision of a set (possibly of size 1) of queries.
 
@@ -60,15 +60,14 @@ def mean_average_precision(expected_doc_ids: list, retrieved_doc_ids: list)
     float: The mean average precision.
    """ 
 
-   
-   if len(expected_doc_ids) != len(retrieved_doc_ids):
-       raise ValueError("The number of queries must be the same in both lists.")
+    if len(expected_doc_ids) != len(retrieved_doc_ids):
+        raise ValueError("The number of queries must be the same in both lists.")
     
     if len(expected_doc_ids) == 0:
-         return 0
+            return 0
     
-   if len(expected_doc_ids) == 1:
-       return average_precision(expected_doc_ids[0], retrieved_doc_ids[0])
+    if len(expected_doc_ids) == 1:
+        return average_precision(expected_doc_ids[0], retrieved_doc_ids[0])
     
     ap = [average_precision(expected, retrieved) for expected, retrieved in zip(expected_doc_ids, retrieved_doc_ids)]
 
