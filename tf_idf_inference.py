@@ -12,21 +12,48 @@ import pandas as pd
 import gc
 import csv
 import time
+import random
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
 
-def vectorize_query(query, idf):
-    manager = tf_idf_training.COOMatrixManager(query.getLang())
-    freqs = Counter(query.getTokens())
-    if len(freqs) == 0:
-        return csr_matrix((1,idf.shape[0]), dtype=np.float32)
-    max_freq = max(freqs.values())
+# assumes all queries are from the same lang
+# TODO: this function takes an awful amount of time for german for some reason
+def vectorize_query_batch(query_batch, idf):
+    manager = tf_idf_training.COOMatrixManager(query_batch[0].getLang())
+    empty_query_indices = []
 
-    for word, freq in freqs.items():
-        int_word = tf_idf_training.get_int(word, query.getLang())
-        manager.add(0, int_word, freq / max_freq * idf[int_word])
+    # query_batch is guaranteed to have at most BATCH_SIZE queries
+    with ProcessPoolExecutor() as executor:
+        if args.use_tf_log_ave:
+            tfs_queries_id = list(executor.map(tf_idf_training.compute_log_average_tf, query_batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
+        elif args.use_tf_augmented:
+            tfs_queries_id = list(executor.map(tf_idf_training.compute_augmented_tf, query_batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
+        elif args.use_tf_boolean:
+            tfs_queries_id = list(executor.map(tf_idf_training.compute_boolean_tf, query_batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
+        elif args.use_tf_log:
+            tfs_queries_id = list(executor.map(tf_idf_training.compute_logarithm_tf, query_batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
+        else:
+            tfs_queries_id = list(executor.map(tf_idf_training.compute__basic_tf, query_batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
+        
+        for query_id, _, tf_query in tfs_queries_id:
+            if len(tf_query) == 0:
+                empty_query_indices.append(query_id)
+                continue
+            for int_word, tf in tf_query.items():
+                manager.add(query_id, int_word, tf * idf[int_word])
+        # tokens = query.getTokens()
+        # if len(tokens) == 0:
+        #     print("Empty query: ", query.getId())
+        #     empty_query_indices.append(query.getId())
+        #     continue
+        # freqs = Counter(tokens)
+        # max_freq = max(freqs.values())
+
+        # for word, freq in tqdm(freqs.items(), mininterval=3, desc="Words", leave=False):
+        #     int_word = tf_idf_training.get_int(word, query.getLang())
+        #     manager.add(query.getId(), int_word, freq / max_freq * idf[int_word])
     
-    return manager.get_csr_matrix()
-
+    return manager.get_csr_matrix(), manager.get_docid_row_idx_mapping(), empty_query_indices
 
     
 if __name__ == "__main__":
@@ -75,24 +102,31 @@ if __name__ == "__main__":
             tf_idf =  load_npz(f"{args.tf_idf_save_path}_{lang}.npz")
             docid_row_mapping = utils.load(f"{args.docid_row_mapping_save_path}_{lang}.pkl")
             idf = np.load(args.idf_save_path + f"_{lang}.npy")
-            tf_idf_norms = np.sqrt(tf_idf.multiply(tf_idf).sum(axis=1)).A1  # Norms of all rows
 
-            for query in tqdm(query_list, desc=f"Queries for language {lang}", leave=False):
-                query_vec = vectorize_query(query, idf)
-                dot_products = tf_idf.dot(query_vec.T).toarray().flatten() 
-                query_vec_norm = np.linalg.norm(query_vec.toarray())  # Norm of the 1-row vector
-                cosine_similarities = dot_products / (tf_idf_norms * query_vec_norm)
+            # get tf-idf norms for every document (rows)
+            tf_idf_norms = np.sqrt(tf_idf.power(2).sum(axis=1)).A1  # Norms of all rows
+            len_query_list = len(query_list)
+            for i in range(0, len_query_list, utils.LOAD_BATCH_SIZE):
+                max_idx = min(i + utils.LOAD_BATCH_SIZE, len_query_list)
 
-                min_heap = []
-                for i, similarity in enumerate(cosine_similarities):
-                    # Push to heap if we have less than top_n elements
-                    if len(min_heap) < 10:
-                        heapq.heappush(min_heap, (similarity, i))  # Push a tuple of (similarity, index)
-                    elif similarity > min_heap[0][0]:
-                        heapq.heapreplace(min_heap, (similarity, i))  # Replace the smallest element
+                # vectorize batch of queries and get the norm for every query (row)
+                query_batch_matrix, query_id_mapping, empty_query_indices = vectorize_query_batch(query_list[i:max_idx], idf)
+                query_batch_matrix_norms = np.sqrt(query_batch_matrix.power(2).sum(axis=1)).A1
 
-                writer.writerow([query.getId(), [docid_row_mapping[i] for _, i in min_heap]])
-            
+                # calculate cosine similarities
+                dot_products = tf_idf.dot(query_batch_matrix.T).toarray()  
+                det = np.outer(tf_idf_norms, query_batch_matrix_norms)
+                det[det == 0] = 1e-10
+                cosine_similarities = dot_products / det 
+
+                # choose the best 10 for each query
+                top10_indices = np.argpartition(cosine_similarities, -10, axis=0)[-10:]
+                for i in range(top10_indices.shape[1]):
+                    writer.writerow([query_id_mapping[i], [docid_row_mapping[j] for j in top10_indices[:, i]]])
+                
+                for i in empty_query_indices:
+                    writer.writerow([i, random.sample(list(docid_row_mapping.values()), 10)])
+
             del tf_idf
             del docid_row_mapping
             del idf

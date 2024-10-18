@@ -1,7 +1,7 @@
 from collections import defaultdict
 import os
 import numpy as np
-from utils import Document 
+from utils import Document , Query
 from concurrent.futures import ProcessPoolExecutor
 import utils
 from collections import defaultdict, Counter
@@ -10,7 +10,7 @@ from tqdm import tqdm
 import gc
 from scipy.sparse import coo_matrix, save_npz
 
-def compute__basic_tf(doc: Document)-> tuple[int, utils.Lang, dict]:
+def compute__basic_tf(doc: Document | Query)-> tuple[int, utils.Lang, dict]:
     """
     Compute the term frequency (TF) for each word in a document.
 
@@ -35,17 +35,17 @@ def compute__basic_tf(doc: Document)-> tuple[int, utils.Lang, dict]:
     return doc.getId(), lang, tf
 
 
-def compute_boolean_tf(doc: Document):
+def compute_boolean_tf(doc: Document | Query):
     id_doc, lang, tf = compute__basic_tf(doc)
     return id_doc, lang, {word: 1 if tf[word] > 0 else 0 for word in tf}
 
 
-def compute_logarithm_tf(doc: Document):
+def compute_logarithm_tf(doc: Document | Query):
     id_doc, lang, tf = compute__basic_tf(doc)
     return id_doc, lang, {word: 1 + np.log(tf[word]) if tf[word] > 0 else 1 + np.log(1e-10) for word in tf}
 
 
-def compute_augmented_tf(doc: Document):
+def compute_augmented_tf(doc: Document | Query):
     id_doc, lang, tf = compute__basic_tf(doc)
     if len(tf) == 0:
         return id_doc, lang, tf
@@ -54,7 +54,7 @@ def compute_augmented_tf(doc: Document):
     return id_doc, lang, {word: 0.5 + 0.5 * tf[word] / max_tf for word in tf}
 
 
-def compute_log_average_tf(doc: Document):
+def compute_log_average_tf(doc: Document | Query):
     id_doc, lang, tf = compute_logarithm_tf(doc)
     if len(tf) == 0:
         return id_doc, lang, tf
@@ -227,9 +227,10 @@ def compute_lang_tf_idf(args, divide_batch, lang):
     for i, count in tqdm(enumerate(idf), mininterval=7):
         if args.use_prob_idf:
             if count == 0:
-                idf[i] = 0
+                c = 1e-10
             else:
-                idf[i] = max(0, np.log((total_docs - count) / count))
+                c = count
+            idf[i] = max(0, np.log((total_docs - c) / c))
         else:
             idf[i] = np.log(total_docs / (1 + count))
     
