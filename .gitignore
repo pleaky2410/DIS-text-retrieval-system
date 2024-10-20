@@ -5,9 +5,7 @@ data/corpus.json/
 pyenv
 mlruns
 *.pkl
-*.json
 *.bin
-*.csv
 __pycache__
 word_embedding
 data/corpus.json
