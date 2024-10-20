@@ -20,6 +20,7 @@ import spacy
 import stanza
 import gc
 from nltk.stem import ISRIStemmer
+import string
 
 
 CORPUS_PATH = "data/corpus.json"
@@ -27,6 +28,28 @@ DEV_PATH = "data/dev.csv"
 TEST_PATH = "data/test.csv"
 TRAIN_PATH = "data/train.csv"
 
+class DocProcessingConfig():
+    __slots__ = ['lemmatize', 'stopwords', 'lowercase', 'remove_punctuation', 'remove_numbers', 'remove_special_chars']
+
+    def __init__(self,
+                    lemmatize: bool = False,
+                    stopwords: bool = False,
+                    lowercase: bool = False,
+                    remove_punctuation: bool = False,
+                    remove_numbers: bool = False,
+                    remove_special_chars: bool = False,
+                    **kwargs
+                 ) -> None:
+        
+        self.lemmatize = lemmatize
+        self.stopwords = stopwords
+        self.lowercase = lowercase
+        self.remove_punctuation = remove_punctuation
+        self.remove_numbers = remove_numbers
+        self.remove_special_chars = remove_special_chars
+
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
 LOAD_BATCH_SIZE = 200
@@ -43,13 +66,24 @@ nlp_it = spacy.load("it_core_news_sm")
 nlp_ko = spacy.load("ko_core_news_sm")
 
 class Lang(Enum):
-    ENGLISH = 'en'
-    FRENCH = 'fr'
     GERMAN = 'de'
+    FRENCH = 'fr'
     SPANISH = 'es'
     ITALIAN = 'it'
     ARABIC = 'ar'
+    ENGLISH = 'en'
     KOREAN = 'ko'
+
+
+def args_to_doc_processing_config(args):
+    return DocProcessingConfig(
+        lemmatize=args.lemmatize,
+        stopwords=args.stopwords,
+        lowercase=args.lowercase,
+        remove_punctuation=args.remove_punctuation,
+        remove_numbers=args.remove_numbers,
+        remove_special_chars=args.remove_special_chars
+    )
 
 
 def get_nlp_pipeline(lang: Lang):
@@ -117,7 +151,19 @@ def get_stopwords(lang: Lang):
     else:
          raise Exception("Language not supported")
 
-def preprocess_text(text: str, lang: Lang, args):
+def is_korean_char(char):
+    return ('\uAC00' <= char <= '\uD7A3') or ('\u1100' <= char <= '\u11FF') or ('\u3130' <= char <= '\u318F')
+
+def is_arabic_char(char):
+    return (
+        ('\u0600' <= char <= '\u06FF') or  # Arabic main block
+        ('\u0750' <= char <= '\u077F') or  # Arabic Supplement
+        ('\u08A0' <= char <= '\u08FF') or  # Arabic Extended-A
+        ('\uFB50' <= char <= '\uFDFF') or  # Arabic Presentation Forms-A
+        ('\uFE70' <= char <= '\uFEFF')     # Arabic Presentation Forms-B
+    )
+
+def preprocess_text(text: str, lang: Lang, config: DocProcessingConfig):
     """
     Preprocess the input text by lowercasing, removing punctuation, 
     tokenizing, removing stop words, and stemming.
@@ -129,36 +175,77 @@ def preprocess_text(text: str, lang: Lang, args):
     list: A list of processed tokens.
     """
     # Lowercase the text and remove punctuation in a single step
-    if args.lowercase:
+    if config.lowercase:
         text = text.lower()
     
-    if args.remove_punctuation:
-        text = re.sub(r'[^\w\s]', '', text)
+    if config.remove_numbers:
+        number_pattern = r'\d+'  # Matches any sequence of digits
+        date_pattern = r'(\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b|\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b|\b\d{1,2}\s\w+\s\d{4}\b|\b\w+\s\d{1,2},\s\d{4}\b)'
+        text = re.sub(number_pattern, ' ', text)
+        text = re.sub(date_pattern, ' ', text)
+    
+    if config.remove_special_chars:
+        pattern = r'[#\$%\&\/\(\)={}\[\]\\\.\|\n\t\-]'
+        text = re.sub(pattern, ' ', text).strip()
+
     
     if lang == Lang.ARABIC:
+        punctuation_pattern = r'[،؛؟.!?…“”"\'(){}[\]«»]'
+        if config.remove_punctuation:
+            text = re.sub(punctuation_pattern, ' ', text).strip()
         tokens = nltk.word_tokenize(text)
-    
+        if config.stopwords:
+            stopwords = get_stopwords(Lang.ARABIC)
+            tokens = [
+                token
+                for token in tokens
+                if token not in stopwords
+            ]
+        if config.lemmatize:
+            stemmer = ISRIStemmer()
+            for i, token in enumerate(tokens):
+                tokens[i] = stemmer.stem(token)
     else :
         nlp = get_nlp_pipeline(lang)
         doc = nlp(text)
-        tokens = [token.text for token in doc]
-
-    if args.stopwords:
-        stopwords_lang = get_stopwords(lang)
-        tokens = [
-            token
-            for token in tokens
-            if token not in stopwords_lang
-        ]
-    
-    if args.lemmatize:
-        if lang == Lang.ARABIC:
-            stemmer = ISRIStemmer()
-            tokens = [stemmer.suf32(word) for word in tokens]
+        tokens = [token for token in doc]
+        if config.remove_punctuation:
+            tokens = [token for token in tokens if not token.is_punct]
+        
+        if config.stopwords:
+            tokens = [token for token in tokens if not token.is_stop]
+        
+        if config.lemmatize:
+            tokens = [token.lemma_ for token in tokens]
         else:
-            tokens = [token.lemma_ for token in doc]
+            tokens = [token.text for token in tokens]
+        
+    for i, token in enumerate(tokens):
+        tokens[i] = token.strip()
+    if lang == Lang.ARABIC:
+        tokens = [token for token in tokens if len(token) > 2]
+    elif lang == Lang.KOREAN:
+        tokens = [token for token in tokens if len(token) > 2]
     
+    elif lang == Lang.ENGLISH:
+        tokens = [token for token in tokens if len(token) > 2 and bool(re.fullmatch(r'[a-z0-9]+', token))]
+
+    else:
+        tokens = [token for token in tokens if len(token) > 2]
+
+    if len(tokens) == 0:
+        print(f"Empty document ({lang.value}): {text}")
+        # raise ValueError("Empty document")
     return tokens
+
+def preprocess_text_2(text:str, lang: Lang, cofing=None):
+    text = text.strip()
+    text = "".join([ch for ch in text if ch not in string.punctuation])
+    tokens = nltk.word_tokenize(text)
+    stemmer = PorterStemmer()
+    tokens = [stemmer.stem(token.lower()) for token in tokens if token not in get_stopwords(lang)]
+    return tokens
+        
 
 
 def cossine_similarity(vec1, vec2):
@@ -178,10 +265,11 @@ class Document:
     """
     Represents a document in a specific language.
     """
-    def __init__(self, content: str, lang: Lang, id: int, preprocess_func, args):
-        self.tokens = preprocess_func(content, lang, args)
+    def __init__(self, content: str, lang: Lang, id: int, preprocess_func, config: DocProcessingConfig=DocProcessingConfig()):
+        self.tokens = preprocess_func(content, lang, config)
         self.lang = lang
         self.id = id
+        self.config = config
     
     def __str__(self):
         return f"Document {self.id} - {self.lang.name}: {self.tokens[:30]}..."
@@ -201,60 +289,67 @@ class Query:
     Represents a query in a specific language.
     """
 
-    def __init__(self, content: str, lang: Lang):
+    def __init__(self, content: str, lang: Lang, id: int, preprocess_func, config: DocProcessingConfig=DocProcessingConfig()):
+        self.tokens = preprocess_func(content,lang, config)
+        self.lang = lang
         self.content = content
         self.lang = lang
-    
-    def preprocess(self):
-        self.tokens = preprocess_text(self.content, self.lang)
-
-    def stem(self):
-        self.tokens = stem_tokens(self.tokens)
-    
-    def lemmatize(self):
-        self.tokens = lemmatize_tokens(self.tokens)
-
-    def __str__(self):
-        return f"Query - {self.lang.name}: {self.content[:30]}..."
-    
-    def tokenize(self):
-        if hasattr(self, 'tokens') is False or self.tokens is None:
-            self.tokens = self.content.split()
-        else:
-            raise Exception("Query already tokenized")
-    
-    def getTokens(self):
-        if hasattr(self, 'tokens') is False or self.tokens is None:
-            self.tokenize()
-        return self.tokens
+        self.id = id
     
     def getLang(self):
         return self.lang
     
+    def getTokens(self):
+        return self.tokens
+    
+    def getId(self):
+        return self.id
+    
+    
 def simple_split(content):
     return content.split()
 
-def batch_load_documents(executor, divide_batch, args, path=CORPUS_PATH, preprocess_func=simple_split):
+def batch_load_documents(executor, divide_batch, config: DocProcessingConfig=DocProcessingConfig(), path=CORPUS_PATH, lang: None | Lang=None):
     """
     Load documents from a file.
     """
 
-    partial_create_doc = partial(create_doc, args=args)
+    partial_create_doc = partial(create_doc, config=config)
     # Reading the JSON file
     batch_raw = []
+    # files = 0
     with open(path, "r") as f:
         raw_docs = ijson.items(f, "item")
 
         for raw_doc in raw_docs:
+            # if raw_doc["lang"] != "de":
+            #     continue
+            if lang and lang.value != raw_doc["lang"]:
+                continue
+            # files += 1
+                
             batch_raw.append(raw_doc)
+
             if len(batch_raw) == LOAD_BATCH_SIZE:
-                yield list(executor.map(partial_create_doc, batch_raw, chunksize=LOAD_BATCH_SIZE // divide_batch))
+                if executor is not None:
+                    yield list(executor.map(partial_create_doc, batch_raw, chunksize=LOAD_BATCH_SIZE // divide_batch))
+                else:
+                    yield [partial_create_doc(raw_doc=d) for d in batch_raw]
+
                 batch_raw = []
+                gc.collect()
+
+            # if files == 1000:
+            #     yield list(executor.map(partial_create_doc, batch_raw, chunksize=LOAD_BATCH_SIZE // divide_batch))
+            #     batch_raw = []
+            #     break
             
             
         if len(batch_raw) > 0:
-            yield list(executor.map(partial_create_doc, batch_raw, chunksize=LOAD_BATCH_SIZE // divide_batch))
-
+            if executor is not None:
+                yield list(executor.map(partial_create_doc, batch_raw, chunksize=LOAD_BATCH_SIZE // divide_batch))
+            else:
+                yield [partial_create_doc(raw_doc=d) for d in batch_raw]
 
 def save(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -265,8 +360,11 @@ def load(path):
     with open(path, "rb") as f:
         return pickle.load(f)
 
-def create_doc(raw_doc, args):
-    return Document(raw_doc["text"], Lang(raw_doc["lang"]), raw_doc["docid"], preprocess_text, args)
+def create_doc(raw_doc, config):
+    return Document(raw_doc["text"], Lang(raw_doc["lang"]), raw_doc["docid"], preprocess_text, config)
+
+def create_query(raw_query, config):
+    return Query(raw_query["query"], Lang(raw_query["lang"]), raw_query["id"], preprocess_text, config)
 
 
 def load_lazy_arrays(path):
@@ -287,22 +385,19 @@ def get_args():
     parser.add_argument('--lowercase', type=bool, default=False, help="Whether to lowercase the documents or not.")
     parser.add_argument('--remove_punctuation', type=bool, default=False, help="Whether to remove punctuation from the documents or not.")
     parser.add_argument('--remove_numbers', type=bool, default=False, help="Whether to remove numbers from the documents or not.")
-    parser.add_argument('--remove_special_characters', type=bool, default=False, help="Whether to remove special characters from the documents or not.")
+    parser.add_argument('--remove_special_chars', type=bool, default=False, help="Whether to remove special characters from the documents or not.")
     parser.add_argument('--use_prob_idf', type=bool, default=False, help="Whether to use probabilistic idf or not.")
     parser.add_argument('--use_tf_log_ave', type=bool, default=False, help="Whether to use log average tf or not.")
-    parser.add_argument('--uset_tf_augmented', type=bool, default=False, help="Whether to use augmented tf or not.")
+    parser.add_argument('--use_tf_augmented', type=bool, default=False, help="Whether to use augmented tf or not.")
     parser.add_argument('--use_tf_boolean', type=bool, default=False, help="Whether to use boolean tf or not.")
     parser.add_argument('--use_tf_log', type=bool, default=False, help="Whether to use log tf or not.")
     parser.add_argument('--use_normalization_pivot', type=bool, default=False, help="Whether to use pivot normalization or not.")
     parser.add_argument('--idf_save_path', type=str, required=True, help="The path to save the idf scores.")
     parser.add_argument('--tf_idf_save_path', type=str, required=True, help="The path to save the tf-idf scores.")
-    parser.add_argument('--vocab_path', type=str, default=None, help="The path to load the vocabulary.")
     parser.add_argument('--vocab_save_path', type=str, default='.cache/vocabulary_raw.pkl', help="The path to save the vocabulary, if it does not exist yet")
     parser.add_argument('--vocab_mapping_save_path', type=str, default='.cache/vocabulary_mapping.pkl', help="The path to save the vocabulary, if it does not exist yet")
-    parser.add_argument('--tf_idf_arrays_save_path', type=str, default='.cache/arrays.pkl', help="The path to save the vocabulary, if it does not exist yet")
-    parser.add_argument('--inference', type=bool, default=False, help="Whether to run inference or not.")
-    parser.add_argument('--idf_path', type=str, default=None, help="The path to load the idf scores.")
-    parser.add_argument('--tf_idf_path', type=str, default=None, help="The path to load the tf-idf scores.")
+    parser.add_argument('--docid_row_mapping_save_path', type=str, default='.cache/doc_id_row_mapping.pkl', help="The path to save the docid_row_mapping, if it does not exist yet")
+    parser.add_argument('--inference_output_save_path', type=str, default='output.csv', help="The path to save the inference output.")
 
 
     # Parse the arguments

@@ -10,3 +10,6 @@ mlruns
 *.csv
 __pycache__
 word_embedding
+data/corpus.json
+.cache
+*.csv
