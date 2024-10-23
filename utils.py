@@ -11,8 +11,6 @@ from concurrent.futures import ProcessPoolExecutor
 import ijson
 from functools import partial
 from ko_ww_stopwords.stop_words import ko_ww_stop_words
-import kr_sentence.tokenizer 
-import pyarabic.araby
 import pyarabic.araby_const
 import tkseem as tk
 import pyarabic
@@ -380,25 +378,23 @@ def get_args():
     parser = argparse.ArgumentParser(description="Process command-line arguments.")
 
     parser.add_argument('--lemmatize', type=bool, default=False, help="Whether to lematize the documents or not.")
-    parser.add_argument('--stem', type=bool, default=False, help="Whether to stem the documents or not.")
     parser.add_argument('--stopwords', type=bool, default=False, help="Whether to remove stopwords from the documents or not.")
     parser.add_argument('--lowercase', type=bool, default=False, help="Whether to lowercase the documents or not.")
     parser.add_argument('--remove_punctuation', type=bool, default=False, help="Whether to remove punctuation from the documents or not.")
     parser.add_argument('--remove_numbers', type=bool, default=False, help="Whether to remove numbers from the documents or not.")
     parser.add_argument('--remove_special_chars', type=bool, default=False, help="Whether to remove special characters from the documents or not.")
-    parser.add_argument('--use_prob_idf', type=bool, default=False, help="Whether to use probabilistic idf or not.")
-    parser.add_argument('--use_tf_log_ave', type=bool, default=False, help="Whether to use log average tf or not.")
-    parser.add_argument('--use_tf_augmented', type=bool, default=False, help="Whether to use augmented tf or not.")
-    parser.add_argument('--use_tf_boolean', type=bool, default=False, help="Whether to use boolean tf or not.")
-    parser.add_argument('--use_tf_log', type=bool, default=False, help="Whether to use log tf or not.")
-    parser.add_argument('--use_normalization_pivot', type=bool, default=False, help="Whether to use pivot normalization or not.")
-    parser.add_argument('--idf_save_path', type=str, required=True, help="The path to save the idf scores.")
-    parser.add_argument('--tf_idf_save_path', type=str, required=True, help="The path to save the tf-idf scores.")
+
+    parser.add_argument('--bm25_save_path', type=str, required=True, help="The path to save the bm25 scores.")
     parser.add_argument('--vocab_save_path', type=str, default='.cache/vocabulary_raw.pkl', help="The path to save the vocabulary, if it does not exist yet")
     parser.add_argument('--vocab_mapping_save_path', type=str, default='.cache/vocabulary_mapping.pkl', help="The path to save the vocabulary, if it does not exist yet")
     parser.add_argument('--docid_row_mapping_save_path', type=str, default='.cache/doc_id_row_mapping.pkl', help="The path to save the docid_row_mapping, if it does not exist yet")
     parser.add_argument('--inference_output_save_path', type=str, default='output.csv', help="The path to save the inference output.")
 
+    parser.add_argument('--k_1', type=float, default=1.2, help="Value for BM25 k1 parameter")
+    parser.add_argument('--b', type=float, default=0.75, help="Value for BM25 b parameter")
+    parser.add_argument('--gamma', type=float, default=0.5, help="Gamma value needed for some variants of BM25")
+
+    parser.add_argument('--variant', type=str, default="lucene", choices=["lucene", "atire", "bm25l", "bm25+", "tf_nonlinear"], help="The variant of BM25 to use")
 
     # Parse the arguments
     args = parser.parse_args()

@@ -9,8 +9,10 @@ from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 import gc
 from scipy.sparse import coo_matrix, save_npz
+from functools import partial
+import multiprocessing
 
-def compute__basic_tf(doc: Document | Query)-> tuple[int, utils.Lang, dict]:
+def compute__basic_tf(doc: Document | Query)-> tuple[int, int, dict]:
     """
     Compute the term frequency (TF) for each word in a document.
 
@@ -21,18 +23,13 @@ def compute__basic_tf(doc: Document | Query)-> tuple[int, utils.Lang, dict]:
     dict: A dictionary where keys are words and values are their normalized term frequencies.
     """
     words = doc.getTokens()
-    if len(words) == 0:
-        return doc.getId(), doc.getLang(), {}
+    doc_len = len(words)
+    if doc_len == 0:
+        return doc.getId(), 0, {}
 
     tf = Counter(words)
     lang = doc.getLang()
-
-   # normalize by the maximum term frequency
-    max_value = tf.most_common(1)[0][1]
-
-    tf = {get_int(word, lang): freq / max_value for word, freq in tf.items()}
-
-    return doc.getId(), lang, tf
+    return doc.getId(), doc_len, {get_int(word, lang): count for word, count in tf.items()}
 
 
 def compute_boolean_tf(doc: Document | Query):
@@ -42,7 +39,7 @@ def compute_boolean_tf(doc: Document | Query):
 
 def compute_logarithm_tf(doc: Document | Query):
     id_doc, lang, tf = compute__basic_tf(doc)
-    return id_doc, lang, {word: 1 + np.log(tf[word]) if tf[word] > 0 else 1 + np.log(1e-10) for word in tf}
+    return id_doc, lang, {word: 1 + np.log(tf[word]) if tf[word] > 0 else 0 for word in tf}
 
 
 def compute_augmented_tf(doc: Document | Query):
@@ -50,8 +47,7 @@ def compute_augmented_tf(doc: Document | Query):
     if len(tf) == 0:
         return id_doc, lang, tf
     max_tf = max(tf.values())
-    max_tf = max(max_tf, 1e-10)
-    return id_doc, lang, {word: 0.5 + 0.5 * tf[word] / max_tf for word in tf}
+    return id_doc, lang, {word: 0.5 + 0.5 * tf[word] / max_tf if max_tf != 0 else 0.5 for word in tf}
 
 
 def compute_log_average_tf(doc: Document | Query):
@@ -59,8 +55,7 @@ def compute_log_average_tf(doc: Document | Query):
     if len(tf) == 0:
         return id_doc, lang, tf
     avg_tf = sum(tf.values()) / len(tf)
-    avg_tf = max(avg_tf, 1e-10)
-    return id_doc, lang, { word: tf[word] / (1 + np.log(avg_tf)) for word in tf}
+    return id_doc, lang, { word: tf[word] / (1 + np.log(avg_tf)) if avg_tf != 0 else tf[word] for word in tf}
 
 
 def compute_normalization_pivot_tf(el : float, avg_number_distinct_words_in_doc: float, number_distinct_terms_in_doc: int):
@@ -173,7 +168,7 @@ def get_coo_matrix_manager(tf_idf, lang):
     return manager
 
         
-def compute_lang_tf_idf(args, divide_batch, lang):
+def compute_lang_bm25(args, divide_batch, lang):
     global mappings, mappings_save_path
     idf = np.zeros(get_vocabulary_size(lang) + 1)
     mappings_save_path = args.vocab_mapping_save_path
@@ -182,15 +177,17 @@ def compute_lang_tf_idf(args, divide_batch, lang):
 
     config = utils.args_to_doc_processing_config(args)
 
-    tf_idf_sparse = COOMatrixManager(lang)
-    tf_idf = defaultdict(dict)
+    bm25_sparse = COOMatrixManager(lang)
+    bm25 = defaultdict(dict)
     total_docs = 0
+    avg_doc_len = 0
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         for batch in tqdm(utils.batch_load_documents(executor=executor, divide_batch=divide_batch, config=config, lang=lang)):
             total_docs += len(batch)
             
             list_unique_words_per_lang =  compute_unique_words(batch)
+            avg_doc_len += sum(len(doc.getTokens()) for doc in batch)
 
             assert(len(list_unique_words_per_lang) == 1) #safety check
 
@@ -199,20 +196,11 @@ def compute_lang_tf_idf(args, divide_batch, lang):
                     for word in doc_unique_words:
                         idf[get_int(word, lang)] += 1
             
-                if args.use_tf_log_ave:
-                    tfs_docs_id = list(executor.map(compute_log_average_tf, batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
-                elif args.use_tf_augmented:
-                    tfs_docs_id = list(executor.map(compute_augmented_tf, batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
-                elif args.use_tf_boolean:
-                    tfs_docs_id = list(executor.map(compute_boolean_tf, batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
-                elif args.use_tf_log:
-                    tfs_docs_id = list(executor.map(compute_logarithm_tf, batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
-                else:
-                    tfs_docs_id = list(executor.map(compute__basic_tf, batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
+                tfs_docs_id = list(executor.map(compute__basic_tf, batch, chunksize=utils.LOAD_BATCH_SIZE // divide_batch))
 
-                for doc_id, _ , tf_doc in tfs_docs_id:
-                    for int_word, tf in tf_doc.items():
-                        tf_idf[int_word][doc_id] = tf
+                for doc_id, doc_len , tf_doc in tfs_docs_id:
+                    for int_word, count in tf_doc.items():
+                        bm25[int_word][doc_id] = count, doc_len
 
                 del tfs_docs_id
                 gc.collect()
@@ -224,38 +212,50 @@ def compute_lang_tf_idf(args, divide_batch, lang):
 
     print("Calculating idf and tf-idf scores...")
 
+    avg_doc_len /= total_docs
+
     for i, count in tqdm(enumerate(idf), mininterval=7):
-        if args.use_prob_idf:
-            if count == 0:
-                c = 1e-10
-            else:
-                c = count
-            idf[i] = max(0, np.log((total_docs - c) / c))
-        else:
-            idf[i] = np.log(total_docs / (1 + count))
+        if args.variant == "atire":
+            idf[i] = np.log(total_docs / count)
+        
+        elif args.variant == "bm25l":
+            idf[i] = np.log((total_docs + 1) / (count + 0.5))
+        
+        elif args.variant == "bm25+" or args.variant == "tf_nonlinear":
+            idf[i] = np.log((total_docs + 1) / count)
+
+        elif args.variant == "lucene":
+            idf[i] = np.log((total_docs - count + 0.5) / (count + 0.5) + 1) 
     
-    for int_word, docs_tf_idf in tf_idf.items():
-        for doc_id, tf_val in docs_tf_idf.items():
-            tf_idf_sparse.add(doc_id, int_word, tf_val * idf[int_word])
+    for int_word, docs_tf_idf in bm25.items():
+        for doc_id, (count, doc_len) in docs_tf_idf.items():
+            if args.variant == "atire":
+                tf = (args.k_1 + 1) * count / (args.k_1 * (1 - args.b + args.b * doc_len / avg_doc_len) + count)
+
+            elif args.variant == "bm25l":
+                c_td = count / (1 - args.b + args.b * doc_len / avg_doc_len)
+                tf = (args.k_1 + 1) * (c_td * args.gamma) / (args.k_1 + c_td + args.gamma)
+
+            elif args.variant == "bm25+":
+                tf = (args.k_1 + count) / (args.k_1 * (1 - args.b + args.b * doc_len / avg_doc_len) + count) + args.gamma
+
+            elif args.variant == "lucene":
+                tf = count  / (count + args.k_1 * (1 - args.b + args.b * doc_len / avg_doc_len))
+            
+            elif args.variant == "tf_nonlinear":
+                tf = 1 + np.log( 1 + np.log(count / (1 - args.b + args.b * doc_len / avg_doc_len) + args.gamma))
+
+            bm25_sparse.add(doc_id, int_word, tf * idf[int_word])
     
     mappings = {}
     del total_docs
     del divide_batch
-    del tf_idf
+    del bm25
     gc.collect()
 
-    print("Saving idf scores...")
-    np.save(f"{args.idf_save_path}_{lang.value}.npy", idf)
-
-    tf_idf_save_path = args.tf_idf_save_path
-    docid_row_idx_mapping_save_path = args.docid_row_mapping_save_path
-    del args
-    del idf
-    gc.collect()
-
-    print("Saving tf-idf scores...")
-    save_npz(f"{tf_idf_save_path}_{lang.value}.npz", tf_idf_sparse.get_csr_matrix())
-    utils.save(f"{docid_row_idx_mapping_save_path}_{lang.value}.pkl", tf_idf_sparse.get_docid_row_idx_mapping())
+    print("Saving bm25 scores...")
+    save_npz(f"{args.bm25_save_path}_{lang.value}.npz", bm25_sparse.get_csr_matrix())
+    utils.save(f"{args.docid_row_mapping_save_path}_{lang.value}.pkl", bm25_sparse.get_docid_row_idx_mapping())
 
         
 
@@ -269,6 +269,16 @@ if __name__ == "__main__"  :
     if args.vocab_mapping_save_path is None:
         exit("Please provide a path to load the vocabulary mapping.")
 
-    for lang in utils.Lang:
-        compute_lang_tf_idf(args, divide_batch, lang)
+    langs = [lang for lang in utils.Lang]
+    for i in range(0, len(langs), 3):
+        max_idx = min(i+3, len(langs))
+        lang_batch = langs[i:max_idx]
+        processes = []
+        for lang in lang_batch:
+            p = multiprocessing.Process(target=compute_lang_bm25, args=(args, divide_batch, lang))
+            processes.append(p)
+            p.start()
+        
+        for p in processes:
+            p.join()
 
