@@ -239,33 +239,59 @@ class BM25:
         Returns:
         List[int]: List of token IDs.
         """
-        return [self.vocab_dict[token] for token in query_tokens if token in self.vocab_dict]
+        return [self.vocab_dict[token] for token in query_tokens if token in self.vocab_dict] # words not in vocab are ignored
 
-    def retrieve_top_k(self, query_tokens: List[str], k: int = 10):
+    def retrieve_top_k(self, query_tokens: List[str], lang: str, k: int = 10, doc_index_to_lang = None, filter_by_lang: bool = False):
         """
         Retrieve the top k documents for a query.
 
         Parameters:
         query_tokens (List[str]): List of query tokens.
+        lang (str): Language of the documents to search.
         k (int): Number of top documents to retrieve.
+        doc_index_to_lang (dict): Dictionary mapping document indices to their languages.
+        filter_by_lang (bool): Whether to filter documents by language.
 
         Returns:
         Tuple[np.ndarray, np.ndarray]: Arrays of top k scores and their indices.
         """
         query_tokens_ids = self.get_token_ids(query_tokens)
         scores = self.compute_relevance_scores(np.asarray(query_tokens_ids, dtype=INT_TYPE))
-        return get_top_k(scores, k)
 
-    def search(self, queries: TokenData, k: int = 10, show_progress: bool = True, n_threads: int = 0, chunksize: int = 50):
+        if filter_by_lang and lang is not None:
+            # Filter scores based on document language
+            filtered_scores = [(score, idx) for idx, score in enumerate(scores) if doc_index_to_lang[idx] == lang]
+            if not filtered_scores:
+                return np.array([]), np.array([])
+
+            # Convert filtered scores to arrays
+            filtered_scores_array = np.array([score for score, _ in filtered_scores], dtype=FLOAT_TYPE)
+            filtered_indices_array = np.array([idx for _, idx in filtered_scores], dtype=INT_TYPE)
+
+            # Get top k scores and their indices
+            top_k_scores, top_k_indices = get_top_k(filtered_scores_array, k)
+
+            # Map top k indices back to original document indices
+            top_k_indices = filtered_indices_array[top_k_indices]
+        else:
+            # Get top k scores and their indices without filtering by language
+            top_k_scores, top_k_indices = get_top_k(scores, k)
+
+        return top_k_scores, top_k_indices
+
+    def search(self, queries: TokenData, langs: List[str], k: int = 10, show_progress: bool = True, n_threads: int = 0, chunksize: int = 50, doc_index_to_lang = None, filter_by_lang: bool = False):
         """
         Retrieve the top-k documents for each query.
 
         Parameters:
         queries (TokenData): A TokenData object with tokenized queries.
+        langs (List[str]): List of languages corresponding to each query.
         k (int): Number of documents to retrieve for each query.
         show_progress (bool): Whether to show a progress bar.
         n_threads (int): Number of jobs to run in parallel. If -1, it will use all available CPUs. If 0, it will run the jobs sequentially.
         chunksize (int): Number of batches to process in each job in the multiprocessing pool.
+        doc_index_to_lang (dict): Dictionary mapping document indices to their languages.
+        filter_by_lang (bool): Whether to filter documents by language.
 
         Returns:
         Tuple of top k document ids retrieved and their scores.
@@ -273,11 +299,14 @@ class BM25:
         if n_threads == -1:
             n_threads = os.cpu_count()
         queries = tokens_to_strings(queries)
-        topk_fn = partial(self.retrieve_top_k, k=k)
+
+        queries_with_langs = zip(queries, langs)
+
+        topk_fn = partial(self.retrieve_top_k, k=k, doc_index_to_lang=doc_index_to_lang, filter_by_lang=filter_by_lang) # new function with all these args already set
         if n_threads == 0:
-            out = list(tqdm(map(topk_fn, queries), total=len(queries), desc="Retrieving Documents", disable=not show_progress))
+            out = list(tqdm(map(lambda ql: topk_fn(ql[0], ql[1]), queries_with_langs), total=len(queries), desc="Retrieving Documents", disable=not show_progress))
         else:
             with ThreadPoolExecutor(max_workers=n_threads) as executor:
-                out = list(tqdm(executor.map(topk_fn, queries, chunksize=chunksize), total=len(queries), desc="Retrieving Documents", disable=not show_progress))
+                out = list(tqdm(executor.map(lambda ql: topk_fn(ql[0], ql[1]), queries_with_langs, chunksize=chunksize), total=len(queries), desc="Retrieving Documents", disable=not show_progress))
         scores, indices = zip(*out)
         return SearchResults(documents=np.array(indices), scores=np.array(scores))
