@@ -7,6 +7,7 @@ import jax.lax
 from tqdm.auto import tqdm
 import numpy as np
 import math
+import json
 import scipy.sparse as sp
 
 # Specify data types for memory efficiency and performance
@@ -228,6 +229,46 @@ class BM25:
         """
         self.scores = self.build_index(list(corpus.vocab.values()), corpus.ids, show_progress)
         self.vocab_dict = corpus.vocab
+
+    def dump(self, scores_path, vocab_path):
+        """
+        Save the BM25 index and vocabulary to disk.
+
+        Parameters:
+        scores_path (str): Path to save the BM25 scores.
+        vocab_path (str): Path to save the vocabulary dictionary.
+        """
+        # Save self.scores
+        np.savez_compressed(scores_path, 
+                            data=self.scores['data'], 
+                            indices=self.scores['indices'], 
+                            indptr=self.scores['indptr'], 
+                            num_docs=self.scores['num_docs'])
+        
+        # Save self.vocab_dict
+        with open(vocab_path, 'w') as vocab_file:
+            json.dump(self.vocab_dict, vocab_file)
+
+    def load(self, scores_path, vocab_path):
+        """
+        Load the BM25 index and vocabulary from disk.
+
+        Parameters:
+        scores_path (str): Path to load the BM25 scores from.
+        vocab_path (str): Path to load the vocabulary dictionary from.
+        """
+        # Load self.scores
+        loaded = np.load(scores_path)
+        self.scores = {
+            "data": loaded['data'], 
+            "indices": loaded['indices'], 
+            "indptr": loaded['indptr'], 
+            "num_docs": loaded['num_docs']
+        }
+        
+        # Load self.vocab_dict
+        with open(vocab_path, 'r') as vocab_file:
+            self.vocab_dict = json.load(vocab_file)
 
     def get_token_ids(self, query_tokens: List[str]) -> List[int]:
         """
